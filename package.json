@@ -1,0 +1,27 @@
+{
+  "name": "google-maps-reviews-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for scraping Google Maps reviews",
+  "module": "src/index.ts",
+  "type": "module",
+  "bin": {
+    "google-maps-reviews-mcp": "./src/index.ts"
+  },
+  "scripts": {
+    "dev": "bun run src/index.ts",
+    "build": "bun build src/index.ts --outdir dist --target node",
+    "test": "bun run test-scraper.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "^25.0.8"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.25.2",
+    "playwright": "^1.57.0",
+    "zod": "^4.3.5"
+  }
+}
