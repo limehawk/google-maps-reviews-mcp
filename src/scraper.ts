@@ -25,16 +25,21 @@ async function getContext(): Promise<BrowserContext> {
   return context;
 }
 
-async function handleConsentDialog(page: Page): Promise<void> {
+async function dismissDialogs(page: Page): Promise<void> {
+  // Dismiss cookie consent
   try {
-    const consentBtn = await page.$('button:has-text("Accept all")');
-    if (consentBtn) {
-      await consentBtn.click();
-      await page.waitForTimeout(1000);
-    }
-  } catch {
-    // No consent dialog
-  }
+    await page.click('button:has-text("Accept all")', { timeout: 2000 });
+  } catch { /* no dialog */ }
+
+  // Dismiss "Google Maps is better on app" dialog
+  try {
+    await page.click('button:has-text("Go back to web")', { timeout: 2000 });
+  } catch { /* no dialog */ }
+
+  // Also try "Continue" or closing other dialogs
+  try {
+    await page.click('button:has-text("Continue")', { timeout: 1000 });
+  } catch { /* no dialog */ }
 }
 
 async function scrollToLoadReviews(page: Page, targetCount: number): Promise<void> {
@@ -43,8 +48,7 @@ async function scrollToLoadReviews(page: Page, targetCount: number): Promise<voi
   const maxAttempts = 20;
 
   while (attempts < maxAttempts) {
-    // Count reviews by looking for date patterns like "X ago"
-    const reviewCount = await page.locator('text=/\\d+\\s+(day|week|month|year)s?\\s+ago/i').count();
+    const reviewCount = await page.locator('.hjmQqc').count();
 
     if (reviewCount >= targetCount) break;
     if (reviewCount === previousCount) {
@@ -55,22 +59,42 @@ async function scrollToLoadReviews(page: Page, targetCount: number): Promise<voi
 
     previousCount = reviewCount;
 
-    // Scroll down
     await page.mouse.wheel(0, 500);
     await page.waitForTimeout(500);
   }
 }
 
-function parseRating(text: string): number {
-  // Look for star patterns like "5 stars" or just count filled stars
-  const match = text.match(/(\d)\s*star/i);
-  if (match) return parseInt(match[1], 10);
+function extractName(fullName: string): string {
+  // The full name might include business/title like "Dawn Melancon, Realtor, CMRS NextHome Luxury"
+  // Extract just the person's name (first part before comma, or first two capitalized words)
 
-  // Try to count star indicators
-  const starCount = (text.match(/★/g) || []).length;
+  // If there's a comma, take the first part
+  if (fullName.includes(',')) {
+    return fullName.split(',')[0].trim();
+  }
+
+  // Otherwise, try to get first two words (typical name pattern)
+  const words = fullName.trim().split(/\s+/);
+  if (words.length >= 2) {
+    // Check if first two words look like a name (capitalized)
+    const firstTwo = words.slice(0, 2).join(' ');
+    if (/^[A-Z][a-z]+\s+[A-Z][a-z]+/.test(firstTwo)) {
+      return firstTwo;
+    }
+  }
+
+  return fullName.trim();
+}
+
+function parseRating(starsText: string): number {
+  // Count star characters or parse from text
+  const starCount = (starsText.match(/★/g) || []).length;
   if (starCount > 0) return starCount;
 
-  return 0;
+  const match = starsText.match(/(\d)\s*star/i);
+  if (match) return parseInt(match[1], 10);
+
+  return 5; // Default
 }
 
 export async function getReviews(url: string, count: number = 10): Promise<Review[]> {
@@ -79,72 +103,68 @@ export async function getReviews(url: string, count: number = 10): Promise<Revie
 
   try {
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
-    await handleConsentDialog(page);
     await page.waitForTimeout(3000);
+    await dismissDialogs(page);
+    await page.waitForTimeout(2000);
 
     // Scroll to load more reviews
     await scrollToLoadReviews(page, count);
     await page.waitForTimeout(1000);
 
-    // Get all text content and parse reviews
-    const pageText = await page.locator('body').textContent() || '';
-
-    // Parse reviews from the text - they follow a pattern:
-    // [Name][Time ago][Review text]
+    // Extract reviews using DOM structure
     const reviews: Review[] = [];
+    const reviewElements = await page.locator('.hjmQqc').all();
 
-    // Find all "X ago" patterns and work backwards/forwards to extract reviews
-    const agoPattern = /(\d+\s+(?:day|week|month|year)s?\s+ago)/gi;
-    const matches = [...pageText.matchAll(agoPattern)];
+    for (let i = 0; i < Math.min(reviewElements.length, count); i++) {
+      try {
+        const el = reviewElements[i];
+        const text = await el.textContent() || '';
 
-    for (let i = 0; i < Math.min(matches.length, count); i++) {
-      const match = matches[i];
-      const dateIndex = match.index || 0;
+        // Parse the text: [Name][Date][Stars][ReviewText]
+        // Date pattern: "X (days|weeks|months|years) ago"
+        const dateMatch = text.match(/(\d+\s+(?:day|week|month|year)s?\s+ago)/i);
+        if (!dateMatch) continue;
 
-      // Look backwards for name (usually capitalized words before the date)
-      const textBefore = pageText.slice(Math.max(0, dateIndex - 200), dateIndex);
-      const nameMatch = textBefore.match(/([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*)\s*$/);
-      const name = nameMatch ? nameMatch[1].trim() : 'Anonymous';
+        const dateIndex = text.indexOf(dateMatch[0]);
+        const beforeDate = text.slice(0, dateIndex).trim();
+        const afterDate = text.slice(dateIndex + dateMatch[0].length).trim();
 
-      // Look forward for review text (until next review or end)
-      const nextMatchIndex = matches[i + 1]?.index || pageText.length;
-      const textAfter = pageText.slice(dateIndex + match[0].length, Math.min(nextMatchIndex, dateIndex + 1000));
+        // Name is everything before the date
+        const fullName = beforeDate;
+        const name = extractName(fullName);
 
-      // Clean up the review text
-      let text = textAfter.trim();
-      // Remove common UI elements
-      text = text.replace(/^(Report review|Cancel|Helpful|Share)/gi, '').trim();
-      text = text.replace(/(Report review|Helpful|Share|Cancel)$/gi, '').trim();
+        // Review text is after the date, possibly after stars
+        let reviewText = afterDate;
+        // Remove leading stars
+        reviewText = reviewText.replace(/^[★☆\s]+/, '').trim();
 
-      // Remove duplicate text (Google shows truncated then full review)
-      const halfLen = Math.floor(text.length / 2);
-      if (text.length > 100) {
-        const firstHalf = text.slice(0, halfLen);
-        const secondHalf = text.slice(halfLen);
-        // If the second half starts similarly to the first, it's a duplicate
-        if (secondHalf.startsWith(firstHalf.slice(0, 50))) {
-          text = secondHalf;
-        }
-      }
+        // Skip if no actual review text
+        if (reviewText.length < 10) continue;
 
-      // Remove trailing name (next reviewer's name sometimes gets attached)
-      text = text.replace(/[A-Z][a-z]+\s+[A-Z][a-z]+\s*$/, '').trim();
+        // Try to find rating (stars before the review text)
+        const rating = parseRating(afterDate.slice(0, 20));
 
-      // Try to find rating in the text before or after
-      const ratingText = textBefore + textAfter.slice(0, 50);
-      const rating = parseRating(ratingText);
-
-      if (name && text.length > 10) {
         reviews.push({
           name,
-          rating: rating || 5, // Default to 5 if we can't parse
-          text: text.slice(0, 500), // Limit text length
-          date: match[0],
+          rating,
+          text: reviewText.slice(0, 500),
+          date: dateMatch[0],
         });
+      } catch {
+        // Skip malformed review
       }
     }
 
-    return reviews;
+    // Deduplicate by name+text (sometimes reviews appear multiple times)
+    const seen = new Set<string>();
+    const unique = reviews.filter(r => {
+      const key = r.name + r.text.slice(0, 50);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
+    return unique;
   } finally {
     await page.close();
   }
@@ -156,8 +176,8 @@ export async function getPlaceInfo(url: string): Promise<PlaceInfo | null> {
 
   try {
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
-    await handleConsentDialog(page);
     await page.waitForTimeout(3000);
+    await dismissDialogs(page);
 
     const title = await page.title();
     const reviewCountMatch = title.match(/(\d+)\s*reviews?/i);
@@ -165,15 +185,12 @@ export async function getPlaceInfo(url: string): Promise<PlaceInfo | null> {
 
     const pageText = await page.locator('body').textContent() || '';
 
-    // Try to find rating
     const ratingMatch = pageText.match(/(\d\.\d)\s*(?:stars?|\()/i);
     const rating = ratingMatch ? parseFloat(ratingMatch[1]) : 0;
 
-    // Try to find name (usually in title)
     const nameMatch = title.match(/^(.+?)\s*[-–]/);
     const name = nameMatch ? nameMatch[1].trim() : '';
 
-    // Try to find address
     const addressMatch = pageText.match(/(\d+\s+[A-Za-z0-9\s,]+(?:St|Ave|Blvd|Rd|Dr|Ln|Way|Ct)[^,]*,\s*[A-Z]{2}\s*\d{5})/i);
     const address = addressMatch ? addressMatch[1].trim() : '';
 
