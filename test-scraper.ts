@@ -12,7 +12,7 @@ async function main() {
     console.log(JSON.stringify(placeInfo, null, 2));
 
     console.log("\n--- Reviews (first 5) ---");
-    const reviews = await getReviews(TEST_URL, 5);
+    const reviews = await getReviews(TEST_URL, 20);
     console.log(JSON.stringify(reviews, null, 2));
     console.log(`\nFetched ${reviews.length} reviews`);
   } catch (error) {

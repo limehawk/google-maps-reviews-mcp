@@ -44,23 +44,35 @@ async function dismissDialogs(page: Page): Promise<void> {
 
 async function scrollToLoadReviews(page: Page, targetCount: number): Promise<void> {
   let previousCount = 0;
-  let attempts = 0;
-  const maxAttempts = 20;
+  let stuckAttempts = 0;
+  const maxStuckAttempts = 10;
+  let totalScrolls = 0;
+  const maxTotalScrolls = 50;
 
-  while (attempts < maxAttempts) {
+  while (totalScrolls < maxTotalScrolls) {
     const reviewCount = await page.locator('.hjmQqc').count();
 
     if (reviewCount >= targetCount) break;
+
     if (reviewCount === previousCount) {
-      attempts++;
+      stuckAttempts++;
+      if (stuckAttempts >= maxStuckAttempts) break;
     } else {
-      attempts = 0;
+      stuckAttempts = 0;
     }
 
     previousCount = reviewCount;
+    totalScrolls++;
 
-    await page.mouse.wheel(0, 500);
-    await page.waitForTimeout(500);
+    // Scroll more aggressively
+    await page.mouse.wheel(0, 800);
+    await page.waitForTimeout(600);
+
+    // Every few scrolls, also try keyboard navigation
+    if (totalScrolls % 5 === 0) {
+      await page.keyboard.press('End');
+      await page.waitForTimeout(500);
+    }
   }
 }
 
